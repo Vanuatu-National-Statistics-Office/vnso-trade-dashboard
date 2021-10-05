@@ -1,0 +1,76 @@
+---
+title: "VNSO Trade Dashboard"
+output: 
+  flexdashboard::flex_dashboard:
+    orientation: rows
+    vertical_layout: fill
+runtime: shiny
+---
+
+```{r setup, include=FALSE}
+library(flexdashboard)
+library(DBI)
+library(ggplot2)
+library(shiny)
+library(dplyr)
+library(scales)
+
+# Note where VNSO code/data is on current computer
+#repository <- file.path(dirname(rstudioapi::getSourceEditorContext()$path))
+#setwd(repository) # Required for file.choose() function
+
+setwd(paste0(getwd()))
+
+mydb <- dbConnect(RSQLite::SQLite(), "my-db.sqlite")
+
+
+```
+
+Dashboard
+=======================================================================
+
+
+Column {data-width=650}
+-----------------------------------------------------------------------
+
+### Chart A
+
+```{r View Export Summary}
+
+export <- dbGetQuery(mydb, "SELECT sum([Stat..Value])/1000000 as Totex FROM curtrade WHERE CP4=1000 or CP4=1021 or CP4=1022 or CP4=3071")
+
+import <- dbGetQuery(mydb, "SELECT sum([Stat..Value])/1000000 as Totim FROM curtrade WHERE CP4=4000 or CP4=4071 or CP4=7100")
+
+curtradebalance <- export - import
+
+```
+
+column {data-width=400}
+------------------------------------------------------------------
+### Total Current Month Export (Millions)
+
+```{r Current trade moments}
+
+valueBox((export),
+         icon = 'fa-balance-scale',
+         color = "green")
+```
+
+### Total Current Month Import (Millions)
+```{r Current trade imports}
+valueBox((import),
+         icon = 'fa-balance-scale',
+         color = "blue")
+
+```
+
+### Total Current Month Trade Balance (Millions)
+```{r Current Month trade balance}
+valueBox((curtradebalance),
+         icon = 'fa-balance-scale',
+         color = "red")
+
+```
+
+
+

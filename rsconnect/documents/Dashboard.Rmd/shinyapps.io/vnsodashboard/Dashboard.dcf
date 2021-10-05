@@ -1,0 +1,13 @@
+name: Dashboard
+title: Dashboard
+username:
+account: vnsodashboard
+server: shinyapps.io
+hostUrl: https://api.shinyapps.io/v1
+appId: 4504503
+bundleId: 4943514
+url: https://vnsodashboard.shinyapps.io/dashboard/
+when: 1629426754.66592
+lastSyncTime: 1629426754.66592
+asMultiple: FALSE
+asStatic: FALSE
