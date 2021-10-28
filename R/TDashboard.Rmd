@@ -1,0 +1,845 @@
+---
+title: "VNSO Trade Dashboard"
+output:
+  flexdashboard::flex_dashboard:
+    orientation: rows
+    vertical_layout: scroll
+runtime: shiny
+resource_files: www/logo.png
+---
+
+```{r setup, include=FALSE, warning=FALSE}
+library(knitr)
+library(flexdashboard)
+library(DBI)
+library(ggplot2)
+library(gganimate)
+library(plotly)
+library(shiny)
+library(dplyr)
+library(scales)
+library(tidyverse)
+library(gifski)
+library(openxlsx)
+library(DT)
+library(countrycode) # Get country codes
+library(rmapshaper) # Simplifying polygons
+library(leaflet) # Interactive mapping
+library(tidyr) #Table Pivoting
+library(spatstat)
+
+# Note where VNSO code/data is on current computer
+repository <- file.path(dirname(rstudioapi::getSourceEditorContext()$path))
+setwd(repository) # Required for file.choose() function
+
+
+mydb <- dbConnect(RSQLite::SQLite(), "../data/secure/my-db.sqlite")
+
+
+```
+
+Dashboard
+=======================================================================
+
+
+Column {data-width=650}
+-----------------------------------------------------------------------
+
+```{r View Export Summary}
+
+export <- dbGetQuery(mydb, "SELECT sum([Stat..Value])/1000000 as Totex FROM curtrade WHERE CP4=1000 or CP4=1021 or CP4=1022 or CP4=3071")
+
+import <- dbGetQuery(mydb, "SELECT sum([Stat..Value])/1000000 as Totim FROM curtrade WHERE CP4=4000 or CP4=4071 or CP4=7100")
+
+curtradebalance <- export - import
+
+```
+
+column {data-width=400}
+------------------------------------------------------------------
+### Total Current Month Export (Millions)
+
+```{r Current trade moments}
+
+valueBox((export),
+         icon = 'fa-balance-scale',
+         color = "green")
+```
+
+### Total Current Month Import (Millions)
+```{r Current trade imports}
+valueBox((import),
+         icon = 'fa-balance-scale',
+         color = "blue")
+
+```
+
+### Total Current Month Trade Balance (Millions)
+```{r Current Month trade balance}
+valueBox((curtradebalance),
+         icon = 'fa-balance-scale',
+         color = "red")
+
+```
+
+
+column {data-width=400}
+------------------------------------------------------------------
+
+```{r Trade in services}
+services <- dbGetQuery(mydb, "SELECT * FROM tblservices ORDER BY Year DESC")
+services_select <- services %>%
+                      head(1)
+
+exportServices <- services_select$export
+importServices <- services_select$import
+serviceBalance <- services_select$balance
+
+```
+
+### Services Export - 2019
+```{r}
+valueBox(exportServices,
+         icon = 'fa-balance-scale',
+         color = "green")
+```
+
+
+### Services Import - 2019
+```{r}
+
+valueBox(importServices,
+         icon = 'fa-balance-scale',
+         color = "blue")
+```
+
+
+### Services Trade Balance - 2019
+```{r}
+
+valueBox(serviceBalance,
+         icon = 'fa-balance-scale',
+         color = "green")
+```
+
+
+Column {data-width=400}
+-----------------------------------------------------------------------
+
+### Trades in Goods and Services by Year (Billions)
+
+```{r Trade in goods and serviuces by year}
+#Extract Trade in Goods from the IMTS records
+tradesImport <- dbGetQuery(mydb, "SELECT Year, round(sum(Value)/1000000) as goodsImports FROM importHistory GROUP BY Year ORDER BY Year")
+tradesExport <- dbGetQuery(mydb, "SELECT Year, round(sum(Value)/1000000) as goodsExports FROM exportHistory GROUP BY Year ORDER BY Year")
+
+#Merge trade in goods of Import and Export
+tradeGoods <- merge(tradesImport, tradesExport, by = "Year")
+tradeGoods$goodsBalance <- tradeGoods$goodsExports - tradeGoods$goodsImports
+
+#Exract Trade in Services from RBV table record
+tradeServices <- dbGetQuery(mydb, "SELECT Year, importServices, exportServices, servicesBalance as servicesBalance FROM tblservices GROUP BY Year ORDER BY Year")
+
+#Merge both trade in Services and Trade in Goods
+tradeGoodsServices <- merge(tradeGoods, tradeServices, by = "Year")
+tradeGoodsServices$overallBalance <- tradeGoodsServices$goodsBalance + tradeGoodsServices$servicesBalance
+
+
+```
+
+```{r goods exports/imports/balance by year interactive plot}
+tradeGoodsServices %>%
+  
+  plot_ly(x = ~Year,
+          y = ~goodsExports,
+          color = "blue",
+          type = "scatter",
+          mode = "lines+markers",
+          name = "Export of Goods") %>%
+  
+  add_trace(x = ~Year,
+            y = ~goodsImports,
+            color = "red",
+            name = "Import of Goods") %>%
+  
+  add_trace(x = ~Year,
+            y = ~exportServices,
+            color = "green",
+            name = "Export of Services") %>%
+  
+  add_trace(x = ~Year,
+            y = ~importServices,
+            color = "yellow",
+            name = "Import of Services") %>%
+  
+  plotly::layout(xaxis = list(title = "Year"), yaxis = list(title = 'Value (Millions(Vatu))'))
+```
+
+
+### Trade Balances by Year (Millions)
+
+```{r services exports/imports/balance by year interactive plot}
+
+tradeGoodsServices %>%
+  
+  plot_ly(x = ~Year,
+          y = ~goodsBalance,
+          color = "blue",
+          type = "scatter", 
+          mode = "lines+markers",
+          name = "Goods Balance") %>%
+  
+  add_trace(x = ~Year,
+            y = ~servicesBalance,
+            color = "red",
+            name = "Services Balance") %>%
+  
+  add_trace(x = ~Year,
+            y = ~overallBalance,
+            color = "green",
+            name = "Balance of External Goods & Services") %>%
+  
+  plotly::layout(xaxis = list(title = "Year"), yaxis = list(title = 'Value (Billion(Vatu))'))
+```
+
+Column
+---------------------------------------------------------------------
+### Trade in Goods by Ports
+
+```{r Trades Ports in Billions}
+#Ports Export computation
+portsExport <- dbGetQuery(mydb, "SELECT Year, Office, Procedure, Value/1000000 as exportValue, 
+                          CASE 
+                              WHEN Office = 'VAIR' THEN 'VilaGoodsExport'
+                              WHEN Office = 'VAIRP' THEN 'VilaGoodsExport'
+                              WHEN Office = 'VILA' THEN 'VilaGoodsExport'
+                              WHEN Office = 'VPOST' THEN 'VilaGoodsExport'
+                              WHEN Office = 'VSEA' THEN 'VilaGoodsExport'
+                              WHEN Office = 'VSEAP' THEN 'VilaGoodsExport'
+                          ELSE
+                              'SantoGoodsExport'
+                          
+                          END AS tradeLocation
+                          FROM exportHistory
+                          WHERE Procedure = '1000' or Procedure = '1021' or Procedure = '1022' or Procedure                                           = '3071' ")
+dbWriteTable(mydb, "portsExport", portsExport, overwrite=TRUE)
+
+portsExport_new <- dbGetQuery(mydb, "SELECT tradeLocation, Year, sum(exportValue) as exportValue FROM portsExport GROUP BY tradeLocation, Year ORDER BY Year ")
+
+portsExport_new_pivot <- portsExport_new %>%
+                         pivot_wider(names_from = tradeLocation, values_from = exportValue)
+
+
+#Ports Import computation
+portsImport <- dbGetQuery(mydb, "SELECT Year, Office, Procedure, Value/1000000 as importValue, 
+                          CASE 
+                              WHEN Office = 'VAIR' THEN 'VilaGoodsImport'
+                              WHEN Office = 'VAIRP' THEN 'VilaGoodsImport'
+                              WHEN Office = 'VILA' THEN 'VilaGoodsImport'
+                              WHEN Office = 'VPOST' THEN 'VilaGoodsImport'
+                              WHEN Office = 'VSEA' THEN 'VilaGoodsImport'
+                              WHEN Office = 'VSEAP' THEN 'VilaGoodsImport'
+                          ELSE
+                              'SantoGoodsImport'
+                          
+                          END AS tradeLocation
+                          FROM importHistory
+                          WHERE Procedure = '4000' or Procedure = '4071' or Procedure = '7100'")
+
+dbWriteTable(mydb, "portsImport", portsImport, overwrite=TRUE)
+
+portsImport_new <- dbGetQuery(mydb, "SELECT tradeLocation, Year, sum(importValue) as importValue FROM portsImport GROUP BY tradeLocation, Year ORDER BY Year ")
+
+portsImport_new_pivot <- portsImport_new %>%
+                         pivot_wider(names_from = tradeLocation, values_from = importValue)
+
+#Merge trade imports and exports
+tradeInGoods <- merge(portsExport_new_pivot, portsImport_new_pivot, by = 'Year')
+
+#Calculate trade import total and export total
+tradeInGoods$goodsImportTotal <- tradeInGoods$VilaGoodsImport + tradeInGoods$SantoGoodsImport
+tradeInGoods$goodsExportTotal <- tradeInGoods$VilaGoodsExport + tradeInGoods$SantoGoodsExport
+
+#Read Trade in services from the SQLite database 
+tradeInServices <- dbGetQuery(mydb, "SELECT * FROM tblservices")
+
+#Merge trade in goods and trade in services 
+tradeGoodsAndServices <- merge(tradeInGoods, tradeInServices, by = "Year") 
+
+tradeGoodsAndServices$overallExport <- tradeGoodsAndServices$goodsExportTotal + tradeGoodsAndServices$exportServices
+tradeGoodsAndServices$overallImport <- tradeGoodsAndServices$goodsImportTotal + tradeGoodsAndServices$importServices
+tradeGoodsAndServices$tradeBalance <- tradeGoodsAndServices$overallExport - tradeGoodsAndServices$overallImport
+
+dbWriteTable(mydb, "tradeGoodsAndServices", tradeGoodsAndServices, overwrite=TRUE)
+
+```
+
+
+```{r Trade in goods by Port}
+tradeGoodsAndServices %>%
+  group_by(Year) %>%
+  summarise(GExport_Lug = sum(SantoGoodsExport),
+            GImport_Lug = sum(SantoGoodsImport),
+            GExport_Vil = sum(VilaGoodsExport),
+            GImport_Vil = sum(VilaGoodsImport),
+            GVila_Balance = sum(VilaGoodsExport - VilaGoodsImport),
+            GLug_Balance = sum(SantoGoodsExport - SantoGoodsImport), .groups="keep") %>%
+            #POrts_Balance = sum(Balance), .groups="keep") %>%
+  ungroup() %>%
+   
+  plot_ly(x = ~Year,
+          y = ~GExport_Lug,
+          color = "blue",
+          type = "scatter", 
+          mode = "lines+markers",
+          name = "Luganville Goods Export") %>%
+  
+  add_trace(x = ~Year,
+            y = ~GImport_Lug,
+            color = "red",
+            name = "Luganville Goods Import") %>%
+  
+  add_trace(x = ~Year,
+            y = ~GExport_Vil,
+            color = "green",
+            type = "scatter",
+            mode = "lines+markers",
+            name = "Port Vila Goods Export") %>%
+  
+   add_trace(x = ~Year,
+            y = ~GImport_Vil,
+            color = "purple",
+            type = "scatter",
+            mode = "lines+markers",
+            name = "Port Vila Goods Import") %>%
+  
+  plotly::layout(xaxis = list(title = "Year"), yaxis = list(title = 'Value (Billion (vatu)'))
+
+```
+
+### Trade Balance in Goods by Port
+
+```{r Trade in goods Balances by Port}
+tradeGoodsAndServices %>%
+  group_by(Year) %>%
+  summarise(GLug_Bal = sum(SantoGoodsExport - SantoGoodsImport),
+            GVil_Bal = sum(VilaGoodsExport - VilaGoodsImport), .groups = "keep") %>%
+  ungroup() %>%
+   
+  plot_ly(x = ~Year,
+          y = ~GLug_Bal,
+          color = "blue",
+          type = "scatter", 
+          mode = "lines+markers",
+          name = "Luganville Trade Balance") %>%
+  
+  add_trace(x = ~Year,
+            y = ~GVil_Bal,
+            color = "red",
+            name = "Port Vila Trade Balance") %>%
+  
+  
+  plotly::layout(xaxis = list(title = "Year"), yaxis = list(title = 'Value (Billion (vatu)'))
+
+```
+
+Column {data-width=350}
+-----------------------------------------------------------------------
+
+### Trade Import Activities with 15 top countries overtime
+
+```{r animated graphic for top 10 countries by year for imports, eval = TRUE}
+
+#Extract export data from exportHistory from SQLite database
+countryImport <- dbGetQuery(mydb, "SELECT importHistory.Year,                                                                                importHistory.CTY_Origin,
+                                          country.CNTY_DESCR,
+                                          sum(importHistory.Value)/1000000 as importValue
+                                   FROM importHistory
+                                   INNER JOIN country ON importHistory.CTY_Origin = country.CNTY_CODE
+                                   WHERE CTY_Origin <> 'VR'
+                                   GROUP BY Year, CNTY_DESCR
+                                   ORDER BY Year ")
+
+
+#imp <- dbGetQuery(mydb, "SELECT * FROM country_year_import ORDER BY Year")
+
+countryImport %>% 
+  mutate_if(is.factor, as.character) %>%
+  mutate_if(is.integer, as.numeric) -> countryImport 
+
+imp_formatted <- countryImport %>%
+  group_by(Year) %>%
+  mutate(rank = rank(-importValue),
+         Value_rel = importValue/importValue[rank==1],
+         Value_lbl = paste0(" ",round(importValue))) %>%
+  group_by(CNTY_DESCR) %>% 
+  filter(rank <=15) %>%
+  ungroup()
+
+anim_imp <- ggplot(imp_formatted, 
+                   aes(rank, group = CNTY_DESCR, fill = as.factor(CNTY_DESCR), color = as.factor(CNTY_DESCR))) +
+    
+  geom_tile(aes(y = importValue/2, height = importValue, width = 0.9),
+            alpha = 0.8, color = NA) +
+  
+  geom_text(aes(y = 0, label = paste(CNTY_DESCR, " ")), vjust = 0.2, hjust = 1) +
+  geom_text(aes(y=importValue,label = Value_lbl, hjust=0)) +
+  
+  coord_flip(clip = "off", expand = FALSE) +
+  scale_y_continuous(labels = scales::comma) +
+  scale_x_reverse() +
+  guides(color = FALSE, fill = FALSE) +
+  
+  theme(axis.line=element_blank(),
+        axis.text.x=element_blank(),
+        axis.text.y=element_blank(),
+        axis.ticks=element_blank(),
+        axis.title.x=element_blank(),
+        axis.title.y=element_blank(),
+        legend.position="none",
+        panel.background=element_blank(),
+        panel.border=element_blank(),
+        panel.grid.major=element_blank(),
+        panel.grid.minor=element_blank(),
+        panel.grid.major.x = element_line( size=.1, color="grey" ),
+        panel.grid.minor.x = element_line( size=.1, color="grey" ),
+        plot.title=element_text(size=25, hjust=0.5, face="bold", colour="grey", vjust=-1),
+        plot.subtitle=element_text(size=18, hjust=0.5, face="italic", color="grey"),
+        plot.caption =element_text(size=8, hjust=0.5, face="italic", color="grey"),
+        plot.background=element_blank(),
+        plot.margin = margin(2,2, 2, 4, "cm")) +
+  
+  transition_states(Year, transition_length = 2, state_length = 1, wrap = FALSE) +
+  
+  view_follow(fixed_x = TRUE)  +
+  
+  labs(title = 'Import per Year : {closest_state}',  
+       subtitle  =  "Top 15 Countries Vanuatu has imported from",
+       caption  = "Import Value in Millions of Vatu | Data Source: Asycuda")
+
+animate(anim_imp, nframes = 100, fps = 5)
+```
+
+### Trade Export Activities with 15 top countries overtime
+
+```{r animated graphic for top 10 countries by year for exports, eval = TRUE}
+
+#Extract import data from exportHistory from SQLite database
+countryExport <- dbGetQuery(mydb, "SELECT exportHistory.Year,                                                                                exportHistory.CTY_Dest,
+                                          country.CNTY_DESCR,
+                                          sum(exportHistory.Value)/1000000 as exportValue
+                                   FROM exportHistory
+                                   INNER JOIN country ON exportHistory.CTY_Dest = country.CNTY_CODE
+                                   WHERE CTY_Dest <> 'VR'
+                                   GROUP BY Year, CNTY_DESCR
+                                   ORDER BY Year ")
+
+#Create import annimated column graph
+countryExport %>%
+  mutate_if(is.factor, as.character)%>%
+  mutate_if(is.integer, as.numeric) -> countryExport 
+
+exp_formatted <- countryExport %>%
+  group_by(Year) %>%
+  mutate(rank = rank(-exportValue),
+         Value_rel = exportValue/exportValue[rank==1],
+         Value_lbl = paste0(" ",round(exportValue))) %>%
+  group_by(CNTY_DESCR) %>% 
+  filter(rank <=15) %>%
+  ungroup()
+
+anim_exp <- ggplot(exp_formatted, 
+                   aes(rank, group = CNTY_DESCR, fill = as.factor(CNTY_DESCR), color = as.factor(CNTY_DESCR))) +
+  
+  geom_tile(aes(y = exportValue/2, height = exportValue, width = 0.9),
+            alpha = 0.8, color = NA) +
+  
+  geom_text(aes(y = 0, label = paste(CNTY_DESCR, " ")), vjust = 0.2, hjust = 1) +
+  geom_text(aes(y=exportValue,label = Value_lbl, hjust=0)) +
+  
+  coord_flip(clip = "off", expand = FALSE) +
+  scale_y_continuous(labels = scales::comma) +
+  scale_x_reverse() +
+  guides(color = FALSE, fill = FALSE) +
+  
+  theme(axis.line=element_blank(),
+        axis.text.x=element_blank(),
+        axis.text.y=element_blank(),
+        axis.ticks=element_blank(),
+        axis.title.x=element_blank(),
+        axis.title.y=element_blank(),
+        legend.position="none",
+        panel.background=element_blank(),
+        panel.border=element_blank(),
+        panel.grid.major=element_blank(),
+        panel.grid.minor=element_blank(),
+        panel.grid.major.x = element_line( size=.1, color="grey" ),
+        panel.grid.minor.x = element_line( size=.1, color="grey" ),
+        plot.title=element_text(size=25, hjust=0.5, face="bold", colour="grey", vjust=-1),
+        plot.subtitle=element_text(size=18, hjust=0.5, face="italic", color="grey"),
+        plot.caption =element_text(size=8, hjust=0.5, face="italic", color="grey"),
+        plot.background=element_blank(),
+        plot.margin = margin(2,2, 2, 4, "cm")) +
+  
+  transition_states(Year, transition_length = 4, state_length = 1, wrap = FALSE) +
+  
+  view_follow(fixed_x = TRUE)  +
+  
+  labs(title = 'Export Per Year : {closest_state}',  
+       subtitle  =  "Top 15 Countries Vanuatu has exported to",
+       caption  = "Export Value in Millions of Vatu | Data Source: Asycuda") 
+
+animate(anim_exp, nframes = 100, fps = 5)
+```
+
+
+Export by Commodity {data-navmenu="Trade in Export"}
+=====================================
+
+```{r Export by goods of interest}
+
+historyExport <- dbGetQuery(mydb, "SELECT * FROM historyExport")
+majorTen_Extract_Class <- dbGetQuery(mydb, "SELECT HS, [Principle.Exports] FROM ImpoprtExport_principal")  
+
+majorTen_Exp <- majorTen_Extract_Class
+
+majorTen_Exp_Select <- majorTen_Exp %>%
+  distinct(Principle.Exports) %>%
+  pull(Principle.Exports)
+
+historyExport_Major10_merge <- merge(historyExport, majorTen_Exp, by="HS")
+
+```
+
+
+Column {.sidebar}
+------------------------------------------------------------------
+```{r}
+selectInput(inputId = "MJTN_Exp",label = "Major 10 Goods",choices = majorTen_Exp_Select)
+
+```
+
+```{r}
+
+updateData_export_commodity <- reactive(
+  historyExport_Major10_merge %>% 
+    filter(Principle.Exports == input$MJTN_Exp) %>%
+    group_by(Year) %>%
+    summarise(sum = sum(myvalue/1000000), .groups = "drop")
+  )
+
+```
+
+column
+---------------------------------------------------------------
+### Bar Plot of Export by Commodity
+
+```{r}
+renderPlot({
+  updateData_export_commodity() %>% 
+  ggplot(aes(x=Year, y=sum)) +
+    geom_col() +
+    theme(panel.background = element_rect(fill = '#cccccc', colour = 'red')) +
+    xlab("Year") +
+    ylab("Value (Billion(Vatu))")
+})
+```
+
+
+column
+-------------------------------------------------
+### Table display of the selected commodity 
+```{r}
+renderDT(
+  updateData_export_commodity(), rownames = FALSE, extensions = 'Buttons', filter="top", editable=TRUE,
+  options = list(
+    dom = 'Blfrtip',
+    buttons = c('copy', 'csv', 'excel', 'pdf', 'print'),
+    lengthMenu = list(c(10,50,100,-1),c(10,50,100,"All"))
+  )
+)
+
+```
+
+Export by Country {data-navmenu="Trade in Export"}
+=====================================  
+
+Column {.sidebar}
+------------------------------------------------------------------
+```{r}
+
+uniqueCountriesISO2 <- unique(historyExport$CTY_Dest[is.na(historyExport$CTY_Dest) == FALSE])
+countries <- countrycode(uniqueCountriesISO2, origin = "iso2c", destination = "country.name")
+
+countriesToSelectFrom <- uniqueCountriesISO2
+names(countriesToSelectFrom) <- countries
+countriesToSelectFrom <- countriesToSelectFrom[is.na(countries) == FALSE]
+
+selectInput(inputId = "exportCountry",label = "Metric", choices = countriesToSelectFrom)
+
+```
+
+
+```{r}
+
+updateData_export_country <- reactive(
+  historyExport %>% 
+    filter(CTY_Dest == input$exportCountry) %>%
+    group_by(Year) %>%
+    summarise(sum = myvalue/1000000, .groups = "drop")
+)
+
+```
+
+column
+-------------------------------------------------
+### Bar Plot of Export by Country
+
+```{r}
+renderPlot({
+ updateData_export_country() %>%
+  ggplot(aes(x=Year, y=sum)) +
+  geom_col() +
+  theme(panel.background = element_rect(fill = '#cccccc', colour = 'red')) +
+  xlab("Year") +
+  ylab("Value (Billion(Vatu))")
+})
+```
+
+
+column
+-------------------------------------------------
+### Table display of the selected country 
+```{r}
+renderDT(
+  updateData_export_country(), rownames = F, extensions = 'Buttons', filter="top", editable=T,
+  options = list(
+    dom = 'Blfrtip',
+    buttons = c('copy', 'csv', 'excel', 'pdf', 'print'),
+    lengthMenu = list(c(10,50,100,-1),c(10,50,100,"All"))
+  )
+)
+
+```
+
+
+Import by Goods {data-navmenu="Trade in Import"}
+=====================================
+
+```{r Import by goods of interest}
+
+majorTen_Import_Class <- dbGetQuery(mydb, "SELECT HS, [Principle.Imports] FROM ImpoprtExport_principal")
+historyImport <- dbGetQuery(mydb, "SELECT * FROM historyImport")
+
+historyImport_Major10_merge <- merge(historyImport, majorTen_Import_Class, by="HS")
+
+majorTen_Imp <- majorTen_Import_Class %>%
+  select(HS, Principle.Imports)
+
+majorTen_Imp_Select <- majorTen_Imp %>%
+  group_by(Principle.Imports) %>%
+  summarise()
+
+```
+
+Column {.sidebar}
+------------------------------------------------------------------
+```{r}
+selectInput(inputId = "MJTN",label = "Major 10 Goods",choices = majorTen_Imp_Select)
+
+```
+
+```{r}
+
+updateData_import_commodity <- reactive(
+  historyImport_Major10_merge %>% 
+    filter(Principle.Imports == input$MJTN) %>%
+    group_by(Year) %>%
+    summarise(sum = sum(myvalue/1000000), .groups = "drop")
+  )
+
+```
+
+column
+-------------------------------------------------
+### Bar Plot of Import by Commodity
+
+```{r}
+renderPlot({
+  updateData_import_commodity() %>% 
+  ggplot(aes(x=Year, y=sum)) +
+    geom_col() +
+    theme(panel.background = element_rect(fill = '#cccccc', colour = 'red')) +
+    xlab("Year") +
+    ylab("Value (Billion(Vatu))")
+})
+```
+
+
+column
+-------------------------------------------------
+### Table display of the selected commodity 
+```{r}
+renderDT(
+  updateData_import_commodity(), rownames = F, extensions = 'Buttons', filter="top", editable=T,
+  options = list(
+    dom = 'Blfrtip',
+    buttons = c('copy', 'csv', 'excel', 'pdf', 'print'),
+    lengthMenu = list(c(10,50,100,-1),c(10,50,100,"All"))
+  )
+)
+
+```
+
+Import by Country {data-navmenu="Trade in Import"}
+===================================== 
+
+Column {.sidebar}
+------------------------------------------------------------------
+```{r}
+
+uniqueCountriesISO2 <- unique(historyImport$CTY_Origin[is.na(historyImport$CTY_Origin) == FALSE])
+countries <- countrycode(uniqueCountriesISO2, origin = "iso2c", destination = "country.name")
+
+countriesToSelectFrom <- uniqueCountriesISO2
+names(countriesToSelectFrom) <- countries
+countriesToSelectFrom <- countriesToSelectFrom[is.na(countries) == FALSE]
+
+selectInput(inputId = "importCountry",label = "Metric", choices = countriesToSelectFrom)
+```
+
+
+```{r}
+
+updateData_import_country <- reactive(
+  historyImport %>% 
+    filter(CTY_Origin == input$importCountry) %>%
+    group_by(Year) %>%
+    summarise(sum = myvalue/1000000, .groups = "drop") 
+    
+)
+
+```
+
+
+column
+-------------------------------------------------
+### Bar Plot of Import by Country
+
+```{r}
+renderPlot({
+ updateData_import_country() %>%
+  ggplot(aes(x=Year, y=sum)) +
+  geom_col() +
+  theme(panel.background = element_rect(fill = '#cccccc', colour = 'red')) +
+  xlab("Year") +
+  ylab("Value (Billion(Vatu))")
+})
+```
+
+column
+-------------------------------------------------
+### Table display of the selected country 
+```{r}
+renderDT(
+  updateData_import_country(), rownames = F, extensions = 'Buttons', filter="top", editable=T,
+  options = list(
+    dom = 'Blfrtip',
+    buttons = c('copy', 'csv', 'excel', 'pdf', 'print'),
+    lengthMenu = list(c(10,50,100,-1),c(10,50,100,"All"))
+  )
+)
+
+```
+
+Trade through Maps
+===============================================
+
+```{r load world map, include = FALSE, eval= FALSE}
+# Download world country boundaries from: https://www.naturalearthdata.com/downloads/50m-cultural-vectors/50m-admin-0-countries-2/ (https://www.naturalearthdata.com/http//www.naturalearthdata.com/download/50m/cultural/ne_50m_admin_0_countries.zip)
+# Get a map of the world as as a spatial polygons object
+shapeFile <- file.path("ne_50m_admin_0_countries", "ne_50m_admin_0_countries.shp")
+world <- readOGR(shapeFile, verbose = FALSE)
+
+# Simplify the polygons
+worldSimple <- ms_simplify(world, keep = 0.1)
+
+# Keep necessary columns for joining
+worldSimple@data <- worldSimple@data[, c("NAME", "CONTINENT", "ISO_A2", "ISO_A3")]
+```
+
+```{r join world with trades data}
+# Join in the imports data
+worldImports <- merge(worldSimple, imp[imp$Year == 2018, c("CTY_ID", "Value_mill")], by.x = "ISO_A2", by.y = "CTY_ID")
+
+# Join in the exports
+worldImportsAndExports <- merge(worldImports, exp[exp$Year == 2018, c("CNTY_CODE", "Value_mill")],
+                                by.x = "ISO_A2", by.y = "CNTY_CODE",
+                                suffixes = c("_Imports", "_Exports"))
+```
+
+```{r build interactive map}
+# Create a colour palette
+valueRange <- range(c(worldImportsAndExports$Value_mill_Imports, 
+                      worldImportsAndExports$Value_mill_Exports), na.rm = TRUE)
+colours <- c("blue", "white", "red")
+colourPalette <- colorNumeric(colours, valueRange)
+colourPaletteWithoutNA <- colorNumeric(colours, valueRange, na.color=rgb(0,0,0,0))
+
+# Create labels that will appear on hover
+labels <- paste0("<strong>", worldImportsAndExports$NAME, "</strong>",
+                 "<br>Import value: ", round(worldImportsAndExports$Value_mill_Imports, digits=2),
+                    ifelse(is.na(worldImportsAndExports$Value_mill_Imports), "", " million"),
+                 "<br>Export value: ", round(worldImportsAndExports$Value_mill_Exports, digits=2),
+                 ifelse(is.na(worldImportsAndExports$Value_mill_Exports), "", " million")) %>% lapply(htmltools::HTML)
+
+# Create an interactive map
+leaflet(worldImportsAndExports, options = leafletOptions(crs = leafletCRS(crsClass = "L.CRS.EPSG4326"))) %>%
+
+  setView(lng = 0, lat = 0, zoom = 1) %>%
+  
+  addPolygons(weight = 2, color = "white", dashArray = "3", fillOpacity = 0.5,
+              fillColor = ~colourPalette(Value_mill_Imports),
+              highlight = highlightOptions(weight = 5, color = "#666", dashArray = "",
+                                           fillOpacity = 1, bringToFront = TRUE),
+              label = labels,
+              labelOptions = labelOptions(style = list("font-weight" = "normal", padding = "3px 8px"),
+                                          textsize = "15px", direction = "auto"),
+              group = "Imports") %>%
+
+  addPolygons(weight = 2, color = "white", dashArray = "3", fillOpacity = 0.5,
+              fillColor = ~colourPalette(Value_mill_Exports),
+              highlight = highlightOptions(weight = 5, color = "#666", dashArray = "",
+                                           fillOpacity = 1, bringToFront = TRUE),
+              label = labels,
+              labelOptions = labelOptions(style = list("font-weight" = "normal", padding = "3px 8px"),
+                                          textsize = "15px", direction = "auto"),
+              group = "Exports") %>%
+  
+  addLegend(values = valueRange, bins = seq(from = 0, to = signif(valueRange[2], 2), length.out = 5),
+            pal = colourPaletteWithoutNA, title = "Value (millions)",
+            position = "bottomleft", na.label = "") %>%
+  
+  addLayersControl(baseGroups = c("Imports", "Exports"), 
+                   options = layersControlOptions(collapsed=FALSE)) %>%
+  hideGroup(c("Exports"))
+```
+
+
+
+
+
+
+
+
+Export Microdata {data-navmenu="Microdata Download"}
+==================================================================
+
+
+
+
+
+
+Import Microdata {data-navmenu="Microdata Download"}
+==================================================================
+
