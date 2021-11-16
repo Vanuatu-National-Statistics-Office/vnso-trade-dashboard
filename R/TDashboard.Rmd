@@ -27,14 +27,32 @@ library(rmapshaper) # Simplifying polygons
 library(leaflet) # Interactive mapping
 library(tidyr) #Table Pivoting
 library(spatstat)
+library(RSQLite)
+library(DBI)
 
+```
+
+```{r}
 # Note where VNSO code/data is on current computer
-repository <- file.path(dirname(rstudioapi::getSourceEditorContext()$path))
-setwd(repository) # Required for file.choose() function
+repository <- file.path(dirname(rstudioapi::getSourceEditorContext()$path), "..")
+#setwd(repository) # Required for file.choose() function
+```
 
 
-mydb <- dbConnect(RSQLite::SQLite(), "../data/secure/my-db.sqlite")
+```{r}
+# Note the secure data path
+secureDataFolder <- file.path(repository, "data", "secure")
+secureDataFolder_sqlite <- file.path(repository, "data", "secure")
+```
 
+```{r}
+# Note the open data path
+openDataFolder <- file.path(repository, "data", "open")
+
+
+#mydb <- dbConnect(RSQLite::SQLite(), "../data/secure/my-db.sqlite")
+
+mydb <- dbConnect(RSQLite::SQLite(), file.path(secureDataFolder_sqlite, "my-db.sqlite"))
 
 ```
 
@@ -754,6 +772,8 @@ renderDT(
 
 Trade through Maps
 ===============================================
+
+
 
 ```{r load world map, include = FALSE, eval= FALSE}
 # Download world country boundaries from: https://www.naturalearthdata.com/downloads/50m-cultural-vectors/50m-admin-0-countries-2/ (https://www.naturalearthdata.com/http//www.naturalearthdata.com/download/50m/cultural/ne_50m_admin_0_countries.zip)
